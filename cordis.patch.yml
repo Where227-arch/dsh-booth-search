@@ -1,6 +1,6 @@
 - insert:
     - id: dsh-booth-search
-      name: '@local/booth-search'
+      name: dsh-booth-search
       config:
         proxy: ''
         lang: ja

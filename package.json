@@ -1,6 +1,6 @@
 {
-  "name": "@local/booth-search",
-  "version": "1.4.0",
+  "name": "dsh-booth-search",
+  "version": "1.4.1",
   "type": "module",
   "description": "Search BOOTH for VRChat avatar assets (clothing, shaders, base models) and return item IDs, prices, covers and links, with a dedicated BOOTH page beside the conversation.",
   "license": "MIT",
