@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-booth-search
+      name: '@local/booth-search'
+      config:
+        proxy: ''
+        lang: ja
+        timeoutMs: 20000

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "BOOTH 搜索",
+    "description": "在 BOOTH 上按关键词搜 VRChat 用的服装、着色器、素体等素材，返回商品编号、价格、店铺、封面图和直达链接。"
+  }
+}
