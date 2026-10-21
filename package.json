@@ -1,50 +1,50 @@
-{
-  "name": "dsh-booth-search",
-  "version": "1.4.1",
-  "type": "module",
-  "description": "Search BOOTH for VRChat avatar assets (clothing, shaders, base models) and return item IDs, prices, covers and links, with a dedicated BOOTH page beside the conversation.",
-  "license": "MIT",
-  "author": "Where227-arch",
-  "homepage": "https://github.com/Where227-arch/dsh-booth-search#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Where227-arch/dsh-booth-search.git"
-  },
-  "bugs": {
-    "url": "https://github.com/Where227-arch/dsh-booth-search/issues"
-  },
-  "keywords": [
-    "dsh-plugin",
-    "deepseek-harness",
-    "booth",
-    "vrchat",
-    "avatar",
-    "search"
-  ],
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
-  },
-  "files": [
-    "index.js",
-    "client.js",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "README.md"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation"
-      ]
-    }
-  }
+﻿{
+    "name":  "dsh-booth-search",
+    "version":  "1.4.2",
+    "type":  "module",
+    "description":  "Search BOOTH for VRChat avatar assets (clothing, shaders, base models) and return item IDs, prices, covers and links, with a dedicated BOOTH page beside the conversation.",
+    "license":  "MIT",
+    "author":  "Where227-arch",
+    "homepage":  "https://github.com/Where227-arch/dsh-booth-search#readme",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/Where227-arch/dsh-booth-search.git"
+                   },
+    "bugs":  {
+                 "url":  "https://github.com/Where227-arch/dsh-booth-search/issues"
+             },
+    "keywords":  [
+                     "dsh-plugin",
+                     "deepseek-harness",
+                     "booth",
+                     "vrchat",
+                     "avatar",
+                     "search"
+                 ],
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./locale/*.json":  "./locale/*.json",
+                    "./icon":  "./icon.svg"
+                },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "cordis.patch.yml",
+                  "locale/*.json",
+                  "icon.svg",
+                  "README.md"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "immediately":  true,
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-ui-conversation"
+                                          ]
+                           }
+            }
 }
