@@ -1,4 +1,4 @@
-// @local/booth-search — BOOTH 商品搜索工具
+// dsh-booth-search — BOOTH 商品搜索工具
 // 目标：给 VRChat Avatar 作者用。按关键词搜 BOOTH，返回商品编号、价格、店铺、
 // 简介、封面图（作为会话附件内联显示）和可点击的直达链接。
 // 无第三方依赖：HTML 解析用正则，HTTP 走全局 fetch；需要走代理时用 CONNECT 隧道。

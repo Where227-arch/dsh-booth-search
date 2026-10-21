@@ -1,4 +1,4 @@
-﻿// @local/booth-search — 客户端视图
+// dsh-booth-search — 客户端视图
 // 在会话标题栏的「对话 / 轨迹 / 上下文 / 画廊 / BOOTH / 编队」这一排里注册一个 BOOTH 视图。
 // 数据走宿主侧 /api/booth-search/* 的 JSON 接口，图片走同源代理，避免防盗链。
 // 关键词只收中文：转日文发生在宿主侧，日文串不回传前端。
