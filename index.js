@@ -6,6 +6,7 @@
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { connect as tlsConnect } from 'node:tls'
+import { spawn } from 'node:child_process'
 
 const BOOTH = 'https://booth.pm'
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -22,6 +23,356 @@ const SORT_PARAMS = {
     newest: 'new',
     price_asc: 'price_asc',
     price_desc: 'price_desc',
+}
+
+// 「选购台」用：性别 / 风格 → BOOTH 日文检索词。翻译只发生在宿主侧，日文串不回传前端。
+// 实测：「女の子 アバター」比「女性アバター」更接近真人 VRChat 素体池（后者会捞到大量服装）。
+// 性别词只用在素体检索上：衣装/饰品标题基本不写性别，硬拼进去只会把结果饿死。
+const GENDER_TERMS = {
+    female: '女の子 アバター',
+    male: '男の子 アバター',
+    any: '',
+}
+
+const STYLE_GROUPS = [
+    {
+        id: 'mood', label: '气质',
+        items: [
+            { id: 'cool', label: '帅气', term: 'かっこいい' },
+            { id: 'cute', label: '可爱', term: 'かわいい' },
+            { id: 'shy', label: '腼腆', term: '内気' },
+            { id: 'calm', label: '冷淡', term: 'クール' },
+            { id: 'wild', label: '疯批', term: 'ヤンデレ' },
+            { id: 'elegant', label: '优雅', term: 'エレガント' },
+            { id: 'genki', label: '元气', term: '元気' },
+            { id: 'gentle', label: '温柔', term: '優しい' },
+            { id: 'intellectual', label: '知性', term: '知的' },
+            { id: 'tsundere', label: '傲娇', term: 'ツンデレ' },
+        ],
+    },
+    {
+        id: 'theme', label: '题材',
+        items: [
+            { id: 'military', label: '军装', term: '軍服' },
+            { id: 'uniform', label: '制服', term: '制服' },
+            { id: 'gothic', label: '哥特', term: 'ゴシック' },
+            { id: 'japanese', label: '和风', term: '和風' },
+            { id: 'cyber', label: '机能', term: 'サイバー' },
+            { id: 'fantasy', label: '幻想', term: 'ファンタジー' },
+            { id: 'casual', label: '日常', term: '私服' },
+            { id: 'classic', label: '古典', term: 'クラシック' },
+            { id: 'wasteland', label: '废土', term: 'ポストアポカリプス' },
+            { id: 'academy', label: '学院', term: 'ブレザー' },
+            { id: 'religion', label: '宗教', term: '修道服' },
+            { id: 'chinese', label: '中式', term: 'チャイナ' },
+        ],
+    },
+    {
+        id: 'element', label: '元素',
+        items: [
+            { id: 'star', label: '星星', term: '星' },
+            { id: 'lace', label: '蕾丝', term: 'レース' },
+            { id: 'butterfly', label: '蝴蝶', term: '蝶' },
+            { id: 'skull', label: '骷髅', term: '骸骨' },
+            { id: 'angel', label: '天使', term: '天使' },
+            { id: 'demon', label: '恶魔', term: '悪魔' },
+            { id: 'mecha', label: '机械', term: 'メカ' },
+            { id: 'flower', label: '花', term: '花' },
+            { id: 'ribbon', label: '缎带', term: 'リボン' },
+        ],
+    },
+    {
+        id: 'body', label: '体型',
+        items: [
+            { id: 'petite', label: '娇小', term: '小柄' },
+            { id: 'standard', label: '标准', term: '標準' },
+            { id: 'tall', label: '高挑', term: '長身' },
+            { id: 'glam', label: '御姐', term: 'お姉さん' },
+            { id: 'loli', label: '幼态', term: 'ロリ' },
+        ],
+    },
+]
+
+const STYLE_INDEX = new Map()
+for (const group of STYLE_GROUPS) {
+    for (const item of group.items) {
+        STYLE_INDEX.set(item.id, item)
+    }
+}
+
+const WIZARD_KINDS = [
+    { id: 'base_model', label: '素体' },
+    { id: 'clothing', label: '衣服' },
+    { id: 'accessory', label: '饰品' },
+    { id: 'prop', label: '小道具' },
+]
+
+const WIZARD_SORTS = [
+    { id: 'popular', label: '人气（BOOTH 站内排序）' },
+    { id: 'recommended', label: '相关度' },
+    { id: 'newest', label: '最新上架' },
+    { id: 'price_asc', label: '价格从低到高' },
+    { id: 'price_desc', label: '价格从高到低' },
+]
+
+/** 风格 id → 日文检索片段。 */
+function styleTerm(styleId) {
+    const id = String(styleId ?? '').trim()
+    if (id === '') {
+        return ''
+    }
+    const item = STYLE_INDEX.get(id)
+    return item === undefined ? '' : item.term
+}
+
+// 风格词的「标题命中表」：BOOTH 没有风格筛选，只能用关键词往标题上靠。
+// 用法不是拼进检索式（那会把结果饿死到个位数），而是给宽结果做一个稳定加权：
+// 命中的排前面，其余保持 BOOTH 的热销序（即销量）。
+const STYLE_KEYWORDS = {
+    cool: ['かっこいい', 'カッコいい', 'クール'],
+    cute: ['かわいい', 'カワイイ', 'キュート'],
+    shy: ['内気', 'シャイ', 'はにかみ'],
+    calm: ['クール', '冷静', 'シック'],
+    wild: ['ヤンデレ', '狂気', 'メンヘラ', '病み'],
+    elegant: ['エレガント', '上品', '大人', 'レディース'],
+    genki: ['元気', '明るい', 'スポーティ', 'アクティブ'],
+    gentle: ['優しい', 'やさしい', 'ふんわり', '柔らか'],
+    intellectual: ['知的', '委員長', 'メガネ', '眼鏡'],
+    tsundere: ['ツンデレ', '不機嫌', '生意気'],
+    military: ['軍服', 'ミリタリー', '軍装', '制服'],
+    uniform: ['制服', 'セーラー', 'ブレザー', '学園'],
+    gothic: ['ゴシック', 'ゴス', '中世'],
+    japanese: ['和風', '着物', '浴衣', '和装'],
+    cyber: ['サイバー', 'メカ', '近未来', 'テック'],
+    fantasy: ['ファンタジー', '剣', '魔法', '騎士'],
+    casual: ['私服', 'カジュアル', '普段着', 'リラックス'],
+    classic: ['クラシック', 'ヴィクトリアン', '貴族', '正装'],
+    wasteland: ['ポストアポカリプス', '廃墟', 'サバイバル', '終末'],
+    academy: ['ブレザー', '通学', 'スクール', '制服'],
+    religion: ['修道服', 'シスター', '聖職', '司祭'],
+    chinese: ['チャイナ', '中華', '旗袍'],
+    star: ['星', 'スター', 'スターモチーフ'],
+    lace: ['レース', 'フリル'],
+    butterfly: ['蝶', 'チョウ', 'バタフライ'],
+    skull: ['骸骨', 'ドクロ', 'スカル'],
+    angel: ['天使', '羽', 'エンジェル'],
+    demon: ['悪魔', 'デビル', '角'],
+    mecha: ['メカ', '機械', 'メカニカル'],
+    flower: ['花', 'フラワー', 'ローズ'],
+    ribbon: ['リボン', '蝶結び'],
+    petite: ['小柄', 'ちび', 'ミニ'],
+    standard: ['標準', '平均'],
+    tall: ['長身', '高身長', 'モデル'],
+    glam: ['お姉さん', '大人', '色気', 'レディース'],
+    loli: ['ロリ', '幼'],
+}
+
+/** 多选风格 → 去重后的日文检索词数组。 */
+function styleTerms(styleIds) {
+    const out = []
+    for (const id of Array.isArray(styleIds) ? styleIds : [styleIds]) {
+        const term = styleTerm(id)
+        if (term !== '' && !out.includes(term)) {
+            out.push(term)
+        }
+    }
+    return out
+}
+
+/** 稳定加权：标题命中风格词的排前面，其余顺序不变。支持多选风格叠加。 */
+function boostByStyle(results, styleIds) {
+    const ids = Array.isArray(styleIds) ? styleIds : [styleIds]
+    const keys = []
+    for (const id of ids) {
+        const list = STYLE_KEYWORDS[id]
+        if (Array.isArray(list)) {
+            for (const key of list) {
+                if (!keys.includes(key)) {
+                    keys.push(key)
+                }
+            }
+        }
+    }
+    if (keys.length === 0) {
+        return results
+    }
+    const hit = []
+    const rest = []
+    for (const item of results) {
+        const title = String(item?.title ?? '')
+        if (keys.some(key => title.includes(key))) {
+            hit.push(item)
+        } else {
+            rest.push(item)
+        }
+    }
+    return hit.concat(rest)
+}
+
+// ── 大类框选 ───────────────────────────────────────────────────────────
+// BOOTH 每张商品卡都自带官方分类（item-card__category-anchor）。这是最硬的一道闸：
+// 素体只认 3Dキャラクター、衣服只认 3D衣装…… 之前「素体里混进衣服、衣服里混进着色器/工具」
+// 的根因就是只靠标题关键词去猜，现在改成按分类框死。
+const KIND_CATEGORIES = {
+    base_model: ['3Dキャラクター'],
+    clothing: ['3D衣装'],
+    accessory: ['3D装飾品'],
+    prop: ['3D装飾品'],
+}
+
+// 标题里的性别标记：只用来剔除「明确是另一个性别」的商品，没标记的一律保留，
+// 免得把整页清空。真正的性别判断在分类框选之后结合检索词已收敛得比较准。
+const FEMALE_SIGNAL = /女性|少女|女の子|女子|ガール|お姉さん|レディース|女性向け/i
+const MALE_SIGNAL = /男性|少年|男の子|男子|メンズ|男性向け|イケメン|男子向け|ボーイ/i
+
+function inKindCategory(item, kind) {
+    const allowed = KIND_CATEGORIES[kind]
+    if (!Array.isArray(allowed)) {
+        return true
+    }
+    const category = String(item?.category ?? '').trim()
+    if (category === '') {
+        return true
+    }
+    return allowed.some(one => category.includes(one))
+}
+
+function matchesGender(item, genderId) {
+    if (genderId !== 'female' && genderId !== 'male') {
+        return true
+    }
+    const text = `${item?.title ?? ''} ${item?.shop ?? ''}`
+    const female = FEMALE_SIGNAL.test(text)
+    const male = MALE_SIGNAL.test(text)
+    if (female === male) {
+        return true
+    }
+    return female ? genderId === 'female' : genderId === 'male'
+}
+
+function dropMismatched(results, kind, genderId) {
+    return results.filter(item => inKindCategory(item, kind) && matchesGender(item, genderId))
+}
+
+// ── 素体适配校验 ────────────────────────────────────────────────────────
+// 衣装/发型/饰品的简介里常列「対応アバター：しなの、キプフェル…」。
+// 拿当前选中素体的名字去简介里找：命中=明确支持；没命中但简介里有「対応アバター」类字样=明确不支持；
+// 两样都没有=没标注（不硬判，交给用户在详情页自己看）。
+function normalizeForMatch(value) {
+    return String(value ?? '')
+        .toLowerCase()
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/[「」『』【】\[\]()（）<>＜＞\/／|｜–—\-_:：・.,，。、*＊#＃]/g, '')
+}
+
+const GENERIC_TOKENS = /^(オリジナル|オリジナル3dモデル|3dモデル|vrchat|vrchat向け|モデル|アバター|対応|販売|衣装|髪型|アクセサリ|セット|商品|unity|booth|vrchat向けオリジナル3dモデル)$/i
+
+/** 素体标题 → 可用的名字别名，例如「ラプウィング Lapwing / オリジナル3Dモデル」→ [ラプウィング, Lapwing]。 */
+function avatarAliases(title) {
+    const cleaned = String(title ?? '')
+        .replace(/【[^】]*】/g, ' ')
+        .replace(/[「」『』]/g, ' ')
+    const out = []
+    for (const raw of cleaned.split(/[\/／|｜–—\s\u3000]+/)) {
+        const token = raw.trim().replace(/^[-–—]+|[-–—]+$/g, '')
+        if (token.length < 2 || GENERIC_TOKENS.test(token)) {
+            continue
+        }
+        if (/^(ver|v)\.?\d/i.test(token) || /^\d/.test(token)) {
+            continue
+        }
+        if (!out.includes(token)) {
+            out.push(token)
+        }
+    }
+    return out.slice(0, 4)
+}
+
+const SUPPORT_MARK = /対応アバター|対応素体|対応モデル|対応：|対応:|対応アバター一覧|Supported Avatars/i
+
+const SUPPORT_URL_RE = /(?:https?:\/\/booth\.pm)?(?:\/[-a-z]{2,5})?\/items\/(\d{4,8})/
+
+/** 去标签但保留换行：対応アバター 名单是「名字一行、链接一行」的排版，换行不能丢。 */
+function stripTagsKeepLines(html) {
+    return decodeEntities(String(html ?? '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li|h2|h3|section|ul|ol)>/gi, '\n')
+        .replace(/<[^>]*>/g, ''))
+        .replace(/[ \t\u00a0]+/g, ' ')
+        .replace(/\n{2,}/g, '\n')
+        .trim()
+}
+
+/** 从商品页 HTML 里抠「対応アバター」那一段正文（ld+json 里通常没有这一段）。 */
+function extractSupportSection(html) {
+    const source = String(html ?? '')
+    const anchor = source.search(/(対応アバター|対応素体|対応モデル)\s*</)
+    if (anchor < 0) {
+        return ''
+    }
+    return stripTagsKeepLines(source.slice(anchor, anchor + 9000))
+}
+
+/**
+ * 从商品简介里抽出「対応アバター」名单。
+ * BOOTH 商家普遍写成「名字一行、链接一行」，所以拿链接里的商品号当锚点，名字取它上面最近的一行。
+ * 链接里的商品号就是素体自己的 BOOTH 商品号，比名字匹配精确得多。
+ */
+function parseSupportedAvatars(description) {
+    const text = String(description ?? '')
+    if (!SUPPORT_MARK.test(text)) {
+        return []
+    }
+    const lines = text.split(/\r?\n/).map(line => line.trim())
+    const out = []
+    const seen = new Set()
+    for (let index = 0; index < lines.length; index += 1) {
+        const match = SUPPORT_URL_RE.exec(lines[index])
+        if (match === null) {
+            continue
+        }
+        const id = match[1]
+        if (seen.has(id)) {
+            continue
+        }
+        let name = ''
+        for (let back = index - 1; back >= 0 && back >= index - 3; back -= 1) {
+            const prev = lines[back]
+            if (prev === '' || SUPPORT_URL_RE.test(prev)) {
+                continue
+            }
+            name = prev.replace(/^[\s\u3000　]+/, '').slice(0, 48)
+            break
+        }
+        seen.add(id)
+        out.push({ id, name })
+        if (out.length >= 80) {
+            break
+        }
+    }
+    return out
+}
+
+function checkAvatarSupport(description, avatarTitle) {
+    const aliases = avatarAliases(avatarTitle)
+    if (aliases.length === 0) {
+        return { support: 'unknown', avatarName: '' }
+    }
+    const name = aliases[0]
+    const text = normalizeForMatch(description)
+    if (text.includes('全アバター対応') || text.includes('全てのアバター') || text.includes('全対応')) {
+        return { support: 'yes', avatarName: name }
+    }
+    for (const alias of aliases) {
+        const needle = normalizeForMatch(alias)
+        if (needle.length >= 2 && text.includes(needle)) {
+            return { support: 'yes', avatarName: alias }
+        }
+    }
+    if (SUPPORT_MARK.test(String(description ?? ''))) {
+        return { support: 'no', avatarName: name }
+    }
+    return { support: 'unknown', avatarName: name }
 }
 
 const KIND_TERMS = {
@@ -438,7 +789,8 @@ function parseItemPage(html, id, lang) {
     const title = (ld !== null && typeof ld.name === 'string' && ld.name.trim() !== '' ? ld.name : decodeEntities(ogTitle))
         .replace(/\s+-\s+BOOTH\s*$/i, '')
         .trim()
-    const description = stripTags(String((ld !== null && typeof ld.description === 'string' && ld.description.trim() !== '') ? ld.description : decodeEntities(ogDescription)))
+    const rawDescription = String((ld !== null && typeof ld.description === 'string' && ld.description.trim() !== '') ? ld.description : decodeEntities(ogDescription))
+    const description = stripTags(rawDescription)
     const offers = ld !== null && ld.offers !== null && typeof ld.offers === 'object' ? ld.offers : {}
     const lowPrice = Number(offers.lowPrice ?? offers.price ?? 0)
     const highPrice = Number(offers.highPrice ?? offers.lowPrice ?? offers.price ?? 0)
@@ -457,6 +809,8 @@ function parseItemPage(html, id, lang) {
         title,
         shop,
         description: description.length > 360 ? `${description.slice(0, 360)}…` : description,
+        descriptionFull: description.length > 12_000 ? description.slice(0, 12_000) : description,
+        supported: parseSupportedAvatars(extractSupportSection(html)),
         priceLabel,
         price: Number.isFinite(lowPrice) ? lowPrice : 0,
         url: `${BOOTH}/${lang}/items/${id}`,
@@ -530,10 +884,13 @@ function buildSearchUrl(query, kind, options) {
 async function collectSearch(options, args) {
     const query = String(args.query ?? '').trim()
     const kind = String(args.kind ?? 'auto')
-    const ranking = query === '' && kindTerm(kind) === ''
+    const hasRaw = typeof args.rawQuery === 'string' && args.rawQuery.trim() !== ''
+    const ranking = query === '' && kindTerm(kind) === '' && !hasRaw
     const sort = String(args.sort ?? 'recommended')
     // 中文关键词先在宿主侧转成日文再搜；日文串不回传，对外只见到用户自己输入的中文。
-    const translated = toJapaneseQuery(query)
+    const translated = hasRaw
+        ? { text: String(args.rawQuery).trim(), translated: false, hits: 0 }
+        : toJapaneseQuery(query)
     const url = buildSearchUrl(translated.text, kind, options)
     url.searchParams.set('page', String(args.page))
     if (!ranking) {
@@ -750,6 +1107,8 @@ function itemToolDefinition(ctx, options) {
             if (includeCover) {
                 item.attachment = await attachCover(ctx, item.image, options, `booth-${id}`)
             }
+            // 适配名单只给网页选购台用，别塞进工具返回里撑爆上下文。
+            delete item.supported
             return item
         },
     }
@@ -800,8 +1159,14 @@ async function handleApiRequest(req, res, options) {
         if (pathname === `${API_PREFIX}/item`) {
             return await handleItemApi(res, url, options)
         }
+        if (pathname === `${API_PREFIX}/open`) {
+            return handleOpenApi(res, url)
+        }
         if (pathname === `${API_PREFIX}/image`) {
             return await handleImageApi(res, url, options)
+        }
+        if (pathname === `${API_PREFIX}/meta`) {
+            return sendJson(res, 200, { ok: true, ...wizardMeta() })
         }
         return sendJson(res, 404, { ok: false, error: `未知接口：${pathname}` })
     } catch (error) {
@@ -811,16 +1176,103 @@ async function handleApiRequest(req, res, options) {
 }
 
 async function handleSearchApi(res, url, options) {
-    const { payload, results, limit } = await collectSearch(options, {
-        query: String(url.searchParams.get('q') ?? '').trim(),
-        kind: url.searchParams.get('kind') ?? 'auto',
-        sort: url.searchParams.get('sort') ?? 'recommended',
-        page: clampInt(url.searchParams.get('page'), 1, 1, 50),
-        limit: clampInt(url.searchParams.get('limit'), 24, 1, 60),
+    const kind = url.searchParams.get('kind') ?? 'auto'
+    const genderId = String(url.searchParams.get('gender') ?? '').trim()
+    const styleIds = String(url.searchParams.get('style') ?? '')
+        .split(',')
+        .map(part => part.trim())
+        .filter(part => part !== '')
+    const userQuery = String(url.searchParams.get('q') ?? '').trim()
+    const sort = url.searchParams.get('sort') ?? 'recommended'
+    const page = clampInt(url.searchParams.get('page'), 1, 1, 50)
+    const limit = clampInt(url.searchParams.get('limit'), 24, 1, 60)
+    const genderJa = kind === 'base_model' ? (GENDER_TERMS[genderId] ?? '') : ''
+    const styleJaList = styleTerms(styleIds)
+
+    // 宽检索：只带「性别 + 用户关键词」，让 BOOTH 把这一类按所选排序（默认热销）铺满。
+    // 风格词刻意不拼进检索式——实测拼进去会把结果饿死到个位数（4~10 条）。
+    // 素体额外带一个 VRChat：实测能把「服装/贴图」混入压到 24 条里 3 条左右。
+    const userJa = toJapaneseQuery(userQuery).text
+    const broadRaw = [
+        kind === 'base_model' && userJa === '' ? 'VRChat' : '',
+        genderJa,
+        userJa,
+    ].filter(part => part !== '').join(' ')
+    const broad = await collectSearch(options, {
+        query: userQuery,
+        rawQuery: broadRaw === '' ? undefined : broadRaw,
+        kind,
+        sort,
+        page,
+        limit,
         minPrice: url.searchParams.get('minPrice'),
         maxPrice: url.searchParams.get('maxPrice'),
     })
-    return sendJson(res, 200, { ok: true, ...payload, results: results.slice(0, limit) })
+
+    let results = broad.results
+
+    // 衣服/饰品/小道具：风格词本身就是商品词（軍服、ゴシック、和風…），
+    // 第一页补一次「风格词 + 性别」的精确检索，命中项顶到最前，再用宽结果补满。
+    // 素体不走这条路：风格词配「素体」实测会把衣服混进来，只保留下面的标题加权。
+    if (styleJaList.length > 0 && page === 1 && kind !== 'base_model') {
+        // 多选风格：每个风格词各搜 4 条，按选择顺序依次顶到前面。
+        const narrowHits = []
+        for (const term of styleJaList.slice(0, 3)) {
+            try {
+                const narrow = await collectSearch(options, {
+                    query: '',
+                    rawQuery: [term, genderJa].filter(part => part !== '').join(' '),
+                    kind,
+                    sort: 'popular',
+                    page: 1,
+                    limit: 4,
+                    minPrice: null,
+                    maxPrice: null,
+                })
+                narrowHits.push(...narrow.results)
+            } catch {
+                // 单个风格词检索失败就当没有
+            }
+        }
+        const seen = new Set()
+        results = narrowHits.concat(results).filter(item => {
+            const key = String(item.id ?? '')
+            if (key === '' || seen.has(key)) {
+                return false
+            }
+            seen.add(key)
+            return true
+        })
+    }
+
+    // 先框选大类（按 BOOTH 官方分类），再按性别标记剔一次，最后做风格加权。
+    results = boostByStyle(dropMismatched(results, kind, genderId), styleIds)
+
+    return sendJson(res, 200, {
+        ok: true,
+        ...broad.payload,
+        gender: genderId,
+        style: styleIds.join(','),
+        results: results.slice(0, limit),
+    })
+}
+
+/** 选购台的选项表：性别 / 风格分组 / 分类 / 排序 / 参考图。 */
+function wizardMeta() {
+    return {
+        genders: [
+            { id: 'female', label: '女性' },
+            { id: 'male', label: '男性' },
+            { id: 'any', label: '不限' },
+        ],
+        styles: STYLE_GROUPS.map(group => ({
+            id: group.id,
+            label: group.label,
+            items: group.items.map(item => ({ id: item.id, label: item.label })),
+        })),
+        kinds: WIZARD_KINDS,
+        sorts: WIZARD_SORTS,
+    }
 }
 
 async function handleItemApi(res, url, options) {
@@ -829,7 +1281,51 @@ async function handleItemApi(res, url, options) {
         return sendJson(res, 400, { ok: false, error: '缺少商品编号 id' })
     }
     const item = await fetchBoothItem(options, id)
-    return sendJson(res, 200, { ok: true, item })
+    const avatar = String(url.searchParams.get('avatar') ?? '').trim()
+    const avatarId = parseItemId(url.searchParams.get('avatarId'))
+    const list = Array.isArray(item.supported) ? item.supported : []
+    let verdict = { support: 'unknown', avatarName: '', source: 'none' }
+    if (avatarId !== undefined && list.length > 0) {
+        // 精确判定：名单里的商品号就是素体自己的商品号。
+        const hit = list.find(entry => entry.id === avatarId)
+        verdict = {
+            support: hit === undefined ? 'no' : 'yes',
+            avatarName: hit === undefined ? avatar : (hit.name === '' ? avatar : hit.name),
+            source: 'id',
+        }
+    } else if (avatar !== '') {
+        // 没有名单时退回名字匹配。
+        const byName = checkAvatarSupport(item.descriptionFull ?? item.description ?? '', avatar)
+        verdict = { support: byName.support, avatarName: byName.avatarName, source: 'name' }
+    }
+    return sendJson(res, 200, {
+        ok: true,
+        item,
+        support: verdict.support,
+        avatarName: verdict.avatarName,
+        supportSource: verdict.source,
+        supported: list.slice(0, 60),
+    })
+}
+
+/** 用系统默认浏览器打开 booth.pm 商品页（插件内不开内嵌浏览器）。 */
+function handleOpenApi(res, url) {
+    const target = String(url.searchParams.get('url') ?? '').trim()
+    let parsed
+    try {
+        parsed = new URL(target)
+    } catch {
+        return sendJson(res, 400, { ok: false, error: 'url 不合法' })
+    }
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'booth.pm') {
+        return sendJson(res, 400, { ok: false, error: '只允许打开 booth.pm 的链接' })
+    }
+    try {
+        spawn('cmd', ['/c', 'start', '', parsed.href], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    } catch (error) {
+        return sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+    return sendJson(res, 200, { ok: true })
 }
 
 async function handleImageApi(res, url, options) {
